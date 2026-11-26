@@ -33,6 +33,10 @@ def _on_task_failure(context: dict) -> None:
     )
 
 
+# Silver tables whose audit records the `dq_silver_gate` currently requires.
+SILVER_GATE_TABLES: tuple[str, ...] = ("silver_clients",)
+
+
 DEFAULT_ARGS = {
     "owner": "data-engineering",
     "depends_on_past": False,
@@ -105,8 +109,19 @@ with DAG(
         transform_fx_rates_todo >> transform_invoices_expenses_todo
         transform_clients >> transform_crm_events_todo
 
-    # TODO: Wire Silver DQ gate (SCD2 no-overlap, zero NULL EUR amounts, quarantine warn ratio).
-    dq_silver_gate = EmptyOperator(task_id="dq_silver_gate")
+    # Silver DQ gate: fails on any ERROR/FAIL in `dq_audit_results` for `{{ ds }}` or when a
+    # required table has no audit rows. Extend SILVER_GATE_TABLES as Silver jobs are implemented
+    # (full list: `dq.gate.REQUIRED_TABLES["silver"]`).
+    dq_silver_gate = BashOperator(
+        task_id="dq_silver_gate",
+        bash_command=(
+            'spark-submit --master "${SPARK_MASTER_URL:-spark://spark-master:7077}" '
+            "/opt/workspace/dq/gate.py --layer silver "
+            '--batch-date "{{ ds }}" --run-id "{{ run_id }}" '
+            f'--tables "{",".join(SILVER_GATE_TABLES)}"'
+        ),
+        retries=0,
+    )
 
     with TaskGroup(group_id="gold_marts") as gold_marts:
         # TODO: Replace placeholders with parallel Gold mart PySpark tasks.
